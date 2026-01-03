@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+
+# Binaries
+sappis_server
+sappis_client
+test_res
+test_preproc

@@ -46,6 +46,7 @@ SystemConfig ConfigManager::loadSystemConfig(const std::string& filename) {
             else if (key == "LOG_FILE") cfg.log_file = value;
             else if (key == "SYS_FILE") cfg.sys_file = value;
             else if (key == "TOTAL_CORES") cfg.total_cores = std::stoi(value);
+            else if (key == "SYSTEM_RESERVED_CORES") cfg.system_reserved_cores = std::stoi(value);
             else if (key == "BASE_PORT") cfg.base_port = std::stoi(value);
             else if (key == "PORT_RANGE") cfg.port_range = std::stoi(value);
             else if (key == "PRE_BASE_PORT") cfg.pre_base_port = std::stoi(value);
@@ -54,7 +55,7 @@ SystemConfig ConfigManager::loadSystemConfig(const std::string& filename) {
             else if (key == "MAX_PREPROC_CONCURRENCY") cfg.max_preproc_concurrency = std::stoi(value);
             else if (key == "DEFAULT_SLO_K_FACTOR") cfg.default_slo_k_factor = std::stod(value);
             else if (key == "SERVER_CMD_TEMPLATE") cfg.server_cmd_template = value;
-            else if (key == "CLIENT_CMD_TEMPLATE") cfg.client_cmd_template = value;
+            else if (key == "CLIENT_CMD_TEMPLATE") cfg.client_cmd_template = value; // it is missing at server
             else if (key == "PREPROC_CMD_TEMPLATE") cfg.preproc_cmd_template = value;
         }
     }

@@ -17,24 +17,32 @@ struct ModelProfile {
 };
 
 struct SystemConfig {
-    int scheduler_port;
     std::string server_ip;
+    int scheduler_port;
     int max_conn;
-    std::string scheduler_mode;
-    std::string snni_dir;
-    std::string log_file;
-    std::string sys_file;
     int total_cores;
+    int system_reserved_cores; // NEW
+    int max_preproc_concurrency;
+    
     int base_port;
     int port_range;
     int pre_base_port;
-    double aging_factor;
-    int max_preproc_concurrency;
+    
+    std::string scheduler_mode;
     double default_slo_k_factor;
-
+    double aging_factor;
+    
     std::string server_cmd_template;
-    std::string client_cmd_template;
     std::string preproc_cmd_template;
+    std::string snni_dir;
+    std::string log_file;
+};
+
+
+struct SystemSnapshot {
+    double cpu_load;
+    double mem_used_gb;
+    long energy_uj; 
 };
 
 struct Job {

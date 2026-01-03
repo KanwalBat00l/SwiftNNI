@@ -11,6 +11,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <filesystem> // C++17
 
 #include "ConfigManager.hpp"
 #include "ResourceManager.hpp"
@@ -19,6 +20,8 @@
 #include "StringUtils.hpp"
 #include "ProcessLauncher.hpp"
 #include "Logger.hpp"
+
+namespace fs = std::filesystem;
 
 // --- Global State ---
 std::atomic<bool> running{true};
@@ -119,10 +122,20 @@ void dispatcherThread(SystemConfig& sys, std::map<std::string, ModelProfile>& pr
         
         int rc = ProcessLauncher::runShellCommand(cmd, timeout_sec);
 
+
         // --- Cleanup ---
         j.finish_ts = nowMs();
         rm.releaseCores(req_threads);
         rm.releasePort(port);
+        // PHYSICAL CLEANUP
+        try {
+            std::string s_file = sys.snni_dir + "/" + file_prefix + "_server.dat";
+            std::string c_file = sys.snni_dir + "/" + file_prefix + "_client.dat";
+            if (fs::exists(s_file)) fs::remove(s_file);
+            if (fs::exists(c_file)) fs::remove(c_file);
+        } catch (const std::exception& e) {
+            std::cerr << "[Cleanup Error] " << e.what() << std::endl;
+        }
         fm.releaseFile(key, file_prefix); // Free up slot in the buffer of N
 
         logger.logJob(j, rc);
@@ -140,14 +153,35 @@ int main() {
         
         ResourceManager res_mgr(sys.total_cores, sys.base_port, sys.port_range, sys.max_preproc_concurrency);
         FileManager file_mgr;
-        FCFSScheduler scheduler;
         Logger logger(sys.log_file);
+        
+        // 2. THE FACTORY PATTERN: Choose scheduler based on config
+        std::unique_ptr<IScheduler> scheduler;
 
-        // 2. Start Dispatcher Thread
-        std::thread dispatch_thread(dispatcherThread, std::ref(sys), std::ref(profiles), 
-                                    std::ref(scheduler), std::ref(file_mgr), std::ref(res_mgr), std::ref(logger));
+        if (sys.scheduler_mode == "FCFS") {
+            scheduler = std::make_unique<FCFSScheduler>();
+        } else if (sys.scheduler_mode == "SJF") {
+            // Note: Pass the aging_factor from sys config
+            scheduler = std::make_unique<SJFScheduler>(sys.aging_factor);
+        } else if (sys.scheduler_mode == "LST") {
+            // scheduler = std::make_unique<LSTScheduler>(); // This will be Phase 2
+        } else {
+            throw std::runtime_error("Unknown SCHEDULER_MODE in config: " + sys.scheduler_mode);
+        }
 
-        // 3. Start Proactive Replenisher Thread
+        std::cout << "[SAPPIS] Scheduler initialized in " << sys.scheduler_mode << " mode." << std::endl;
+
+        // 3. Start Dispatcher Thread
+        std::thread dispatch_thread(dispatcherThread, 
+            std::ref(sys), 
+            std::ref(profiles), 
+            std::ref(*scheduler), // Dereference to pass as IScheduler&
+            std::ref(file_mgr), 
+            std::ref(res_mgr), 
+            std::ref(logger));
+
+        
+        // 4. Start Proactive Replenisher Thread
         std::thread replenisher([&]() {
             while (running) {
                 for (auto const& [key, p] : profiles) {
@@ -171,7 +205,7 @@ int main() {
             }
         });
 
-        // 4. Setup Main Listener Socket
+        // 5. Setup Main Listener Socket
         int server_fd = socket(AF_INET, SOCK_STREAM, 0);
         server_fd_global = server_fd;
         int opt = 1;
@@ -183,7 +217,7 @@ int main() {
 
         std::cout << "[SAPPIS] Listening for requests on " << global_server_ip << ":" << sys.scheduler_port << std::endl;
 
-        // 5. Admission Control Loop
+        // 6. Admission Control Loop
         while (running) {
             sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
