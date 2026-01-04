@@ -1,2 +1,4 @@
 obj/
 *.csv
+sappis_server
+sappis_client
