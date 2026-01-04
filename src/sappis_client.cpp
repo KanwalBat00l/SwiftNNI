@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -6,14 +7,14 @@
 #include <vector>
 #include <sstream>
 #include <sys/wait.h>
-#include <algorithm>
+#include <chrono>
+#include <thread>
 #include "ConfigManager.hpp"
 #include "StringUtils.hpp"
 
 struct ClientConfig {
     std::string snni_dir;
     std::string client_cmd_template;
-    int timeout = 300;
 };
 
 ClientConfig loadClientConfig(std::string path) {
@@ -22,16 +23,12 @@ ClientConfig loadClientConfig(std::string path) {
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
-        
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
-
         std::string key = ConfigManager::trim(line.substr(0, eq));
         std::string val = ConfigManager::trim(line.substr(eq + 1));
-
         if (key == "SNNI_DIR") cfg.snni_dir = val;
         else if (key == "CLIENT_CMD_TEMPLATE") cfg.client_cmd_template = val;
-        else if (key == "INFERENCE_TIMEOUT") cfg.timeout = std::stoi(val);
     }
     return cfg;
 }
@@ -45,12 +42,12 @@ int main(int argc, char* argv[]) {
     std::string srv_ip = argv[1];
     int srv_port = std::stoi(argv[2]);
     std::string model = argv[3];
-    std::string batch = argv[4];
-    std::string slo = argv[5];
+    int batch = std::stoi(argv[4]);
+    long slo_ms = std::stol(argv[5]);
 
     ClientConfig cfg = loadClientConfig("client.cfg");
 
-    // --- 1. Connect ---
+    // 1. Connection
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
@@ -63,63 +60,61 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // --- 2. Request ---
-    std::string req = "r_" + model + "_" + batch + "_" + slo;
+    // 2. Protocol Handshake
+    std::string req = "r_" + model + "_" + std::to_string(batch) + "_" + std::to_string(slo_ms);
     send(sock, req.c_str(), req.length(), 0);
 
-    // --- 3. Admission ---
-    char buf[2048]; 
-    memset(buf, 0, sizeof(buf));
-    int n1 = read(sock, buf, sizeof(buf)-1);
-    if (n1 <= 0) return 1;
-    buf[n1] = '\0';
-    std::string resp = ConfigManager::trim(buf);
-    std::cout << "[SAPPIS] Admission: " << resp << std::endl;
-
-    if (resp != "ACCEPTED") { close(sock); return 1; }
-
-    // --- 4. Wait for Dispatch ---
-    std::cout << "[SAPPIS] Waiting for ready file..." << std::endl;
-    memset(buf, 0, sizeof(buf));
-    int n2 = read(sock, buf, sizeof(buf)-1);
-    if (n2 <= 0) return 1;
-    buf[n2] = '\0';
-    
-    std::string dispatch = ConfigManager::trim(buf);
-    std::cout << "[SAPPIS] Dispatch: " << dispatch << std::endl;
-    close(sock);
-
-    // --- 5. Parse Dispatch ---
-    // Expected: START_INF:IP:PORT:MODEL:BATCH:FILE
-    std::stringstream ss(dispatch);
-    std::string item;
-    std::vector<std::string> p;
-    while (std::getline(ss, item, ':')) {
-        p.push_back(ConfigManager::trim(item));
-    }
-
-    if (p.size() < 6) {
-        std::cerr << "Malformed dispatch msg\n";
+    char buf[1024] = {0};
+    int n = read(sock, buf, sizeof(buf)-1);
+    if (n <= 0) return 1;
+    if (std::string(buf).find("ACCEPTED") == std::string::npos) {
+        std::cout << "[Client] Request rejected by server." << std::endl;
         return 1;
     }
 
-    // --- 6. Execution ---
-    // p[1]=IP, p[2]=Port, p[3]=Model, p[4]=Batch, p[5]=File
+    // 3. Wait for Dispatch
+    std::cout << "[Client] Waiting for dispatch..." << std::endl;
+    memset(buf, 0, sizeof(buf));
+    n = read(sock, buf, sizeof(buf)-1);
+    if (n <= 0) return 1;
+    std::string dispatch = buf;
+    close(sock);
+
+    // 4. Parse & Command Prep
+    std::stringstream ss(dispatch);
+    std::string item;
+    std::vector<std::string> p; // IP, Port, Model, Batch, File
+    while (std::getline(ss, item, ':')) p.push_back(item);
+
     std::string cmd = StringUtils::buildCommand(cfg.client_cmd_template, cfg.snni_dir, 
                                                p[3], std::stoi(p[4]), std::stoi(p[2]), p[5], p[1]);
 
-    std::cout << "[Executing] " << cmd << std::endl;
-
+    // 5. Execution with Zombie Guard
+    // Guard timeout = SLO + 30s buffer
+    int zombie_guard_sec = static_cast<int>((slo_ms / 1000) + 30);
+    
     pid_t pid = fork();
     if (pid == 0) {
-        // Use a clean environment for the shell
         execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)NULL);
         _exit(127);
     } else {
+        auto start = std::chrono::steady_clock::now();
         int status;
-        waitpid(pid, &status, 0);
-        std::cout << "[Result] Exit Code: " << WEXITSTATUS(status) << std::endl;
+        while (true) {
+            pid_t res = waitpid(pid, &status, WNOHANG);
+            if (res == pid) {
+                std::cout << "[Client] Finished. RC: " << WEXITSTATUS(status) << std::endl;
+                break;
+            }
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+            if (elapsed > zombie_guard_sec) {
+                std::cerr << "[Client] Safety timeout hit. Killing stuck process." << std::endl;
+                kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
     }
-
     return 0;
 }

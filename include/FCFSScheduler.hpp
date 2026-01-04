@@ -1,31 +1,29 @@
 #pragma once
 #include "IScheduler.hpp"
-#include "Types.hpp"
 #include <queue>
 #include <mutex>
-#include <optional>
 
 class FCFSScheduler : public IScheduler {
 public:
-    void push(const Job& job) override {
+    void push(const Job& j) override {
         std::lock_guard<std::mutex> lock(mtx);
-        q.push(job);
+        queue.push(j);
     }
 
     std::optional<Job> pop() override {
         std::lock_guard<std::mutex> lock(mtx);
-        if (q.empty()) return std::nullopt;
-        Job j = q.front();
-        q.pop();
+        if (queue.empty()) return std::nullopt;
+        Job j = queue.front();
+        queue.pop();
         return j;
     }
 
-    size_t size() const override {
+    size_t size() override {
         std::lock_guard<std::mutex> lock(mtx);
-        return q.size();
+        return queue.size();
     }
 
 private:
-    std::queue<Job> q;
-    mutable std::mutex mtx;
+    std::queue<Job> queue;
+    std::mutex mtx;
 };
