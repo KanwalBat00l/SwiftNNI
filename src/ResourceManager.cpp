@@ -4,37 +4,38 @@
 #include <sstream>
 #include <iostream>
 
-ResourceManager::ResourceManager([[maybe_unused]] int total_cores, int port_base, int port_range, int max_preproc, bool enable_pinning)
+ResourceManager::ResourceManager(int requested_cores, int port_base, int port_range, int max_preproc, bool enable_pinning)
     : pinning_enabled(enable_pinning), max_preproc(max_preproc), active_preproc(0) {
     
-    // 1. Detect physical core IDs assigned by Slurm
+    // 1. Programmatically detect cores allowed by Slurm
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     sched_getaffinity(0, sizeof(cpu_set_t), &cpuset);
     
-    std::vector<int> physical_ids;
+    std::vector<int> actual_available_ids;
     for (int i = 0; i < CPU_SETSIZE; i++) {
-        if (CPU_ISSET(i, &cpuset)) physical_ids.push_back(i);
+        if (CPU_ISSET(i, &cpuset)) {
+            actual_available_ids.push_back(i);
+        }
     }
 
-    // 2. Core Partitioning (Bucket Logic)
-    // Rule: Skip first 2 cores (0, 1) for SAPPIS server overhead.
-    size_t start_idx = 2; 
+    // 2. Logic: Respect Slurm, but respect the "Edge Server" constraint
+    // If Slurm gives 60 cores but you only want to mimic 24, we use the first 24.
+    size_t limit = std::min((size_t)requested_cores, actual_available_ids.size());
     
-    // Fill the Dealer Pool (limited by MAX_PREPROC_CONCURRENCY)
-    for (size_t i = 0; i < static_cast<size_t>(max_preproc) && (start_idx + i) < physical_ids.size(); ++i) {
-        dealer_pool.push_back(physical_ids[start_idx + i]);
+    std::cout << "[ResManager] Slurm provided " << actual_available_ids.size() 
+              << " cores. Using " << limit << " cores to mimic Edge Server." << std::endl;
+
+    // 3. Partition the Bucket (System: 0-1, Dealer: 2-N, Inference: N-End)
+    size_t start_idx = 2; // Reserved for SAPPIS
+    for (size_t i = 0; i < static_cast<size_t>(max_preproc) && (start_idx + i) < limit; ++i) {
+        dealer_pool.push_back(actual_available_ids[start_idx + i]);
     }
-    
-    // Fill the Inference Pool with the remaining physical cores
-    for (size_t i = start_idx + static_cast<size_t>(max_preproc); i < physical_ids.size(); ++i) {
-        inference_pool.push_back(physical_ids[i]);
+    for (size_t i = start_idx + static_cast<size_t>(max_preproc); i < limit; ++i) {
+        inference_pool.push_back(actual_available_ids[i]);
     }
 
-    // 3. Initialize Network Ports
-    for (int i = 0; i < port_range; ++i) {
-        available_ports.insert(port_base + i);
-    }
+    for (int i = 0; i < port_range; ++i) available_ports.insert(port_base + i);
 }
 
 /**

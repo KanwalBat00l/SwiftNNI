@@ -33,10 +33,47 @@ salloc \
   --nodes=2 \
   --ntasks-per-node=1 \
   --cpus-per-task=24 \
-  --mem=32G \
+  --mem=64G \
   --time=00:15:00 \
   --partition=genoa
 # NO --exclusive flag
+
+
+salloc \
+  --job-name=SmallEdge \
+  --nodes=1 \
+  --ntasks-per-node=1 \
+  --cpus-per-task=8 \
+  --mem=16G \
+  --time=00:01:00 \
+  --partition=staging
+# NO --exclusive flag
+
+
+salloc \
+  --partition=gpu_a100 \
+  --gpus=1 \
+  --cpus-per-task=16 \
+  --mem=64G \
+  --time=00:00:30
+
+
+./sappis_client 172.18.59.136 8000 hinet 1 45000 &
+./sappis_client 172.18.59.136 8000 hinet 2 45000 &
+./sappis_client 172.18.59.136 8000 hinet 8 45000 &
+./sappis_client 172.18.59.136 8000 hinet 4 45000 &
+./sappis_client 172.18.59.136 8000 hinet 1 45000 &
+./sappis_client 172.18.59.136 8000 hinet 2 45000 &
+
+./sappis_client 172.18.59.136 8000 alexnet 2 45000 &
+./sappis_client 172.18.59.136 8000 alexnet 1 45000 &
+./sappis_client 172.18.59.136 8000 alexnet 2 45000 &
+
+./sappis_client 172.18.59.136 8000 simc2 4 45000 &
+./sappis_client 172.18.59.136 8000 simc2 8 45000 &
+./sappis_client 172.18.59.136 8000 simc2 2 45000 &
+./sappis_client 172.18.59.136 8000 simc2 1 45000 &
+
 
 
 model, batch, pre_ms, inf_ms, threads, max_buff, file_mb, pre_mem_mb, inf_mem_mb

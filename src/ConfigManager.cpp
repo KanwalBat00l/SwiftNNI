@@ -89,3 +89,14 @@ std::map<std::string, ModelProfile> ConfigManager::loadProfiles(const std::strin
     }
     return profiles;
 }
+
+std::string FileManager::initiateFile(const std::string& model_key) {
+    std::lock_guard<std::mutex> lock(mtx);
+    auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    
+    // Auditable naming: alexnet_1_f_123456789
+    std::string prefix = model_key + "_f_" + std::to_string(now);
+
+    file_map[model_key].push_back({prefix, FileStatus::CREATING});
+    return prefix;
+}
