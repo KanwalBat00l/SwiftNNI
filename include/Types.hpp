@@ -101,6 +101,9 @@ struct ModelProfile {
     std::string preproc_cmd_template;
     std::string snni_dir;
     std::string log_file;
+    std::string sys_file;
+    std::string dqn_weights_path;      // New: From config
+    std::string dynamic_profile_path;  // New: From config (e.g. logs/profile_dynamic.cfg)
 };
 
 /**
@@ -112,7 +115,8 @@ struct ModelProfile {
  struct SystemSnapshot {
     double cpu_load;
     double mem_used_gb;
-    long energy_uj;
+    double total_mem_gb; // NEW: Programmatic capacity
+    long energy_uj; 
 };
 
 /**

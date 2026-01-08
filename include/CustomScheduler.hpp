@@ -3,26 +3,12 @@
 
 /**
  * @class CustomScheduler
- * @brief Placeholder for any new scheduling technique you might wish to implement.
+ * @brief Simple placeholder for future experimental algorithms.
  */
 class CustomScheduler : public IScheduler {
-public:
-    void push(const Job& j) override {
-        std::lock_guard<std::mutex> lock(mtx);
-        queue.push_back(j);
+protected:
+    void sortQueue([[maybe_unused]] std::map<std::string, ModelProfile>& profiles, 
+                   [[maybe_unused]] double total_mem_gb) override {
+        // Default: FCFS behavior (no sorting needed as push appends to back)
     }
-
-    std::optional<Job> popReadyJob(FileManager& fm, ResourceManager& rm, 
-                                   std::map<std::string, ModelProfile>& profiles, 
-                                   double total_mem_gb) override {
-        // TODO: Implement Sliding Window and Cost-Function based selection here.
-        // For now, it acts as a simple FCFS.
-        return std::nullopt; 
-    }
-
-    size_t size() override { return queue.size(); }
-
-private:
-    std::list<Job> queue;
-    std::mutex mtx;
 };

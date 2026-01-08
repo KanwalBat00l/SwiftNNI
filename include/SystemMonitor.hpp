@@ -1,5 +1,4 @@
-#ifndef SYSTEM_MONITOR_HPP
-#define SYSTEM_MONITOR_HPP
+#pragma once
 
 #include "Types.hpp"
 #include <string>
@@ -21,9 +20,10 @@ public:
     static SystemSnapshot takeSnapshot();
 
 private:
+
     static double getCpuLoad();
     static double getMemUsedGB();
-    
+    static double getTotalMemGB(); 
     /**
      * @brief High-resolution energy tracking via hardware RAPL.
      * @return Energy in microjoules, or 0 if access is denied.
@@ -41,5 +41,3 @@ private:
      */
     static long parseEnergyString(std::string energy_str);
 };
-
-#endif

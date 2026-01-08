@@ -3,16 +3,8 @@
 #include "ProcessLauncher.hpp"
 #include "SystemMonitor.hpp"
 #include "ConfigManager.hpp"
+#include "SchedulerFactory.hpp"
 
-// Concrete Scheduler Implementations
-//#include "FCFSScheduler.hpp" // NEW: Required for make_unique
-//#include "SJFScheduler.hpp"  // NEW: Required for make_unique
-
-#include "SchedulerFactory.hpp" // Header for the new factory
-
-
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -27,9 +19,9 @@
 namespace fs = std::filesystem;
 
 /**
- * Helper: Get current system time in milliseconds since epoch.
+ * Helper: Current timestamp in ms.
  */
- static long nowMs() {
+static long nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
            std::chrono::system_clock::now().time_since_epoch()).count();
 }
@@ -37,30 +29,25 @@ namespace fs = std::filesystem;
 SAPPISServer::SAPPISServer(SystemConfig config, std::map<std::string, ModelProfile> model_profiles)
     : sys(config), profiles(model_profiles) {
     
-    // Initialize Resource, File, and Log Managers
+    // 1. Initialize core managers
     rm = std::make_unique<ResourceManager>(sys.total_cores, sys.base_port, sys.port_range, 
                                            sys.max_preproc_concurrency, sys.enable_core_pinning);
     fm = std::make_unique<FileManager>();
     logger = std::make_unique<Logger>(sys.log_file);
 
-    /**
-     * FACTORY PATTERN:
-     * Instead of hardcoding FCFSScheduler or SJFScheduler here, we delegate
-     * the creation to the Factory. This makes extending the system easy.
-     */
+    // 2. Instantiate scheduler via Factory (Decoupled design)
     scheduler = SchedulerFactory::create(sys.scheduler_mode, sys.aging_factor);
 }
 
-
 void SAPPISServer::start() {
     running = true;
-    std::cout << "[Server] Engine starting in " << sys.scheduler_mode << " mode..." << std::endl;
+    std::cout << "[SAPPIS] Engine running mode: " << sys.scheduler_mode << std::endl;
 
-    // Launch background threads for Task Dispatching and File Pre-processing
+    // Launch Background Loops
     std::thread d_thread(&SAPPISServer::dispatcherLoop, this);
     std::thread r_thread(&SAPPISServer::replenisherLoop, this);
 
-    // Main thread enters the Listener Loop (Admission Control)
+    // Main thread handles Admission Control
     listenerLoop();
 
     if (d_thread.joinable()) d_thread.join();
@@ -69,39 +56,33 @@ void SAPPISServer::start() {
 
 void SAPPISServer::stop() {
     running = false;
+    saveDynamicProfile(); // Persistence on shutdown
     if (server_fd != -1) {
         shutdown(server_fd, SHUT_RDWR);
         close(server_fd);
     }
 }
 
-
-
 /**
- * REPLENISHER LOOP: Proactively ensures the buffer of .dat files is full.
+ * REPLENISHER: Proactive Pre-processing.
+ * Ensures model buffers are filled by spawning Dealer processes.
  */
 void SAPPISServer::replenisherLoop() {
     while (running) {
         for (auto& [key, p] : profiles) {
             if (!running) break;
-            
-            // Check if we need more files for this model-batch
             if (fm->getActiveCount(key) < p.max_buffer) {
                 if (rm->hasCapacityForDealer()) {
                     std::string prefix = fm->initiateFile(key);
-                    
-                    // Dealer runs on a single core from the Dealer Pool
                     int dealer_core = rm->acquireDealerCore(); 
                     std::string d_core_str = (dealer_core != -1) ? std::to_string(dealer_core) : "";
 
                     std::string cmd = StringUtils::buildCommand(sys.preproc_cmd_template, sys.snni_dir, 
                                                                p.model, p.batch, 0, prefix, "127.0.0.1", d_core_str);
 
-                    // Detach thread to run Dealer binary without blocking the Replenisher
                     std::thread([this, cmd, key, prefix, p, dealer_core]() {
                         int timeout = (p.preproc_ms / 1000) * 2 + 30;
                         ProcessLauncher::runShellCommand(cmd, timeout);
-                        
                         fm->setReady(key, prefix);
                         rm->releaseDealerSlot();
                         if (dealer_core != -1) rm->releaseCores({dealer_core});
@@ -114,201 +95,121 @@ void SAPPISServer::replenisherLoop() {
 }
 
 /**
- * LISTENER LOOP: The system's "Admission Controller".
- * 
- * Steps:
- * 1. Initialize the master TCP socket.
- * 2. Bind to the configured SAPPIS port.
- * 3. Listen for incoming client requests.
- * 4. Parse the request and perform DYNAMIC admission control based on 
- *    the current moving average of inference latency.
+ * LISTENER: Admission Control Handshake.
  */
 void SAPPISServer::listenerLoop() {
-    // 1. Create the socket
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        throw std::runtime_error("Listener: Could not create socket");
-    }
-
-    // Allow immediate reuse of the port after server restart
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // 2. Setup address structure
-    // We use memset to ensure the entire struct (including padding) is zeroed.
-    // This prevents "uninitialized field" warnings and potential network bugs.
     sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(sys.scheduler_port));
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    // 3. Bind and Listen
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(server_fd);
-        throw std::runtime_error("Listener: Bind failed on port " + std::to_string(sys.scheduler_port));
+        throw std::runtime_error("Fatal: Bind failed on port " + std::to_string(sys.scheduler_port));
     }
-
-    if (listen(server_fd, sys.max_conn) < 0) {
-        close(server_fd);
-        throw std::runtime_error("Listener: Listen failed");
-    }
-
-    std::cout << "[Listener] SAPPIS Engine accepting requests on port " << sys.scheduler_port << std::endl;
+    listen(server_fd, sys.max_conn);
 
     while (running) {
-        sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        
-        // Block until a client connects
-        int client_sock = accept(server_fd, (struct sockaddr*)&client_addr, &addr_len);
-        if (client_sock < 0) {
-            if (running) perror("[Listener] accept error");
-            continue;
-        }
+        sockaddr_in c_addr;
+        socklen_t addr_len = sizeof(c_addr);
+        int c_sock = accept(server_fd, (struct sockaddr*)&c_addr, &addr_len);
+        if (c_sock < 0) continue;
 
-        // 4. Read the Request (Expected format: r_model_batch_slo)
-        char buffer[1024] = {0};
-        ssize_t bytes_read = read(client_sock, buffer, sizeof(buffer) - 1);
-        
-        if (bytes_read <= 0) {
-            close(client_sock);
-            continue;
-        }
+        char buf[1024] = {0};
+        int valread = read(c_sock, buf, 1023);
+        if (valread <= 0) { close(c_sock); continue; }
 
-        // Clean string and split by underscores
-        std::string request_str = ConfigManager::trim(buffer);
+        std::string request_str = ConfigManager::trim(buf);
         std::stringstream ss(request_str);
         std::string part;
         std::vector<std::string> parts;
-        while (std::getline(ss, part, '_')) {
-            if (!part.empty()) parts.push_back(part);
-        }
+        while (std::getline(ss, part, '_')) if (!part.empty()) parts.push_back(part);
 
-        // Basic validation
         if (parts.size() < 4) {
-            std::cerr << "[Listener] Malformed request: " << request_str << std::endl;
-            send(client_sock, "REJECTED_FORMAT", 15, 0);
-            close(client_sock);
+            send(c_sock, "REJECTED_FORMAT", 15, 0);
+            close(c_sock);
             continue;
         }
 
-        std::string model_name = parts[1];
-        int batch_size = std::stoi(parts[2]);
+        std::string key = parts[1] + "_" + parts[2];
         long requested_slo = std::stol(parts[3]);
-        std::string profile_key = model_name + "_" + std::to_string(batch_size);
 
-        // 5. Admission Control
-        if (profiles.find(profile_key) == profiles.end()) {
-            send(client_sock, "REJECTED_UNKNOWN_MODEL", 22, 0);
-            close(client_sock);
+        if (profiles.find(key) == profiles.end()) {
+            send(c_sock, "REJECTED_MODEL", 14, 0);
+            close(c_sock);
             continue;
         }
 
-        /**
-         * DYNAMIC ADMISSION CHECK:
-         * We retrieve the current Moving Average of the inference time.
-         * If the system is under load and latency has spiked, 'expected_ms'
-         * will be higher, causing tighter SLOs to be rejected automatically.
-         */
-         
-        long expected_ms = profiles.at(profile_key).dynamic_inf_ms.load();
-        long feasible_threshold = static_cast<long>(expected_ms * sys.default_slo_k_factor);
-
-        if (requested_slo >= feasible_threshold) {
-            // ACCEPTED: Construct the Job and move it to the scheduler
+        // Admission Logic based on Dynamic EMA
+        long expected_ms = profiles.at(key).dynamic_inf_ms.load();
+        if (requested_slo >= static_cast<long>(expected_ms * sys.default_slo_k_factor)) {
             Job new_job;
             new_job.type = 'r';
-            new_job.client_sock = client_sock;
-            new_job.model = model_name;
-            new_job.batch = batch_size;
-            new_job.arrival_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::system_clock::now().time_since_epoch()).count();
+            new_job.client_sock = c_sock;
+            new_job.model = parts[1];
+            new_job.batch = std::stoi(parts[2]);
+            new_job.arrival_ts = nowMs();
             new_job.requested_slo_ms = requested_slo;
 
-            send(client_sock, "ACCEPTED", 8, 0);
+            send(c_sock, "ACCEPTED", 8, 0);
             scheduler->push(new_job);
-            
-            std::cout << "[Admission] Job " << profile_key << " Accepted (Expected: " << expected_ms << "ms)" << std::endl;
         } else {
-            // REJECTED: Inform client and close connection
-            std::cout << "[Admission] Job " << profile_key << " Rejected (SLO " << requested_slo 
-                      << "ms < Threshold " << feasible_threshold << "ms)" << std::endl;
-            send(client_sock, "REJECTED_SLO_UNFEASIBLE", 23, 0);
-            close(client_sock);
+            send(c_sock, "REJECTED_SLO_UNFEASIBLE", 23, 0);
+            close(c_sock);
         }
     }
 }
 
-
 /**
- * DISPATCHER LOOP (Concurrent Version):
- * Now supports multi-threaded execution. It "hands off" jobs to worker threads
- * so it can immediately process the next request in the queue.
+ * DISPATCHER: Concurrent Execution and Resource Management.
  */
 void SAPPISServer::dispatcherLoop() {
+    // Detect system capacity once
+    SystemSnapshot initial_snap = SystemMonitor::takeSnapshot();
+    const double node_ram_limit = initial_snap.total_mem_gb;
+
     while (running) {
-        // 1. Peek at the next job (non-blocking)
-        auto job_opt = scheduler->pop();
+        // --- HO BLOCKING MITIGATION ---
+        // popReadyJob now handles the File + Priority search.
+        auto job_opt = scheduler->popReadyJob(*fm, profiles, node_ram_limit);
+
         if (!job_opt) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
         Job j = *job_opt;
         std::string key = j.model + "_" + std::to_string(j.batch);
-        ModelProfile& prof = profiles.at(key);
 
-        /**
-         * 2. RESOURCE HANDSHAKE (Cores, Files, and RAM)
-         * This loop prevents the system from over-subscribing hardware.
-         */
-        while (running) {
-            // Check current system memory status
-            SystemSnapshot current_sys = SystemMonitor::takeSnapshot();
-            double projected_mem_gb = current_sys.mem_used_gb + (static_cast<double>(prof.inf_mem_mb) / 1024.0);
-
-            // Constraint Check: Do we have File, Cores, and Memory?
-            // We set a hard limit of 95% RAM utilization to avoid OOM crashes.
-            if (projected_mem_gb < (32.0 * 0.95)) { // 32GB is your Slurm limit
-                j.assigned_file = fm->acquireFile(key);
-                if (!j.assigned_file.empty()) {
-                    j.assigned_cores = rm->acquireInferenceCores(prof.threads);
-                    if (!j.assigned_cores.empty()) {
-                        break; // ALL RESOURCES SECURED
-                    } else {
-                        fm->setReady(key, j.assigned_file); // Return file, wait for cores
-                    }
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        if (!running) break;
-
-        // 3. Preparation (Port & Timing)
+        // --- ELASTIC RESOURCE ALLOCATION ---
+        // We take as many cores as possible. Starvation is prevented.
+        j.assigned_cores = rm->acquireCoresElastic(profiles.at(key).threads);
         j.assigned_port = rm->acquirePort();
         j.start_ts = nowMs();
 
-        // 4. CONCURRENT EXECUTION HAND-OFF
-        // We launch a worker thread for this specific job and detach it.
-        // This allows the Dispatcher to immediately return to scheduler->pop().
-        std::thread([this, j, key, prof]() mutable {
+        // Dispatch Worker Thread
+        std::thread([this, j, key]() mutable {
+            // Fix: Use the reference to calculate timeout and learned average
+            ModelProfile& prof = profiles.at(key); 
             
-            // Build command
             std::string core_str = rm->coresToString(j.assigned_cores);
             std::string cmd = StringUtils::buildCommand(sys.server_cmd_template, sys.snni_dir, 
                                                        j.model, j.batch, j.assigned_port, 
                                                        j.assigned_file, sys.server_ip, core_str);
 
-            // Notify client
+            // Step 1: Handshake
             std::stringstream ss;
             ss << "START_INF:" << sys.server_ip << ":" << j.assigned_port << ":" 
                << j.model << ":" << j.batch << ":" << j.assigned_file;
             send(j.client_sock, ss.str().c_str(), ss.str().length(), 0);
             close(j.client_sock);
 
-            // Execute (using safety timeout 5x)
+            // Step 2: Safety Execution
+            // Fix: Access dynamic_inf_ms via 'prof' to clear warning
             long expected_inf = prof.dynamic_inf_ms.load();
             int safety_timeout = static_cast<int>((expected_inf / 1000) * 5 + 60);
             if (safety_timeout < 120) safety_timeout = 120;
@@ -317,64 +218,58 @@ void SAPPISServer::dispatcherLoop() {
             int rc = ProcessLauncher::runShellCommand(cmd, safety_timeout);
             auto end_exec = std::chrono::steady_clock::now();
 
-            // Measurement & Feedback Loop
+            // Step 3: Measurement
             long obs = std::chrono::duration_cast<std::chrono::milliseconds>(end_exec - start_exec).count();
             updateDynamicMetrics(key, obs, 0);
 
-            // Cleanup & Logging
-            j.finish_ts = nowMs();
+            // Step 4: Final Cleanup & Telemetry
+            j.finish_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count();
+            
             SystemSnapshot snap = SystemMonitor::takeSnapshot();
             logger->logJob(j, rc, snap);
 
-            // Release shared resources
+            std::ofstream sys_out(sys.sys_file, std::ios::app);
+            if(sys_out.is_open()) {
+                sys_out << j.finish_ts << ";" << snap.cpu_load << ";" << snap.mem_used_gb << "\n";
+            }
+
             rm->releaseCores(j.assigned_cores);
             rm->releasePort(j.assigned_port);
-            
             try {
                 fs::remove(sys.snni_dir + "/" + j.assigned_file + "_server.dat");
                 fs::remove(sys.snni_dir + "/" + j.assigned_file + "_client.dat");
             } catch (...) {}
-            
             fm->releaseFile(key, j.assigned_file);
 
-            std::cout << "[Worker] Job " << key << " finished on cores [" << core_str << "]" << std::endl;
+            static std::atomic<int> completed{0};
+            if (++completed % 10 == 0) saveDynamicProfile();
 
-            // Inside the Worker Thread Cleanup
-            static std::atomic<int> completed_jobs{0};
-            if (++completed_jobs % 10 == 0) saveDynamicProfile();
-
-        }).detach(); 
+        }).detach();
     }
 }
 
-/**
- * DYNAMIC PROFILING: Updates the moving average of execution times.
- * FIX: Added [[maybe_unused]] to observed_pre.
- */
-void SAPPISServer::updateDynamicMetrics(const std::string& key, 
-                                        long observed_inf, 
-                                        [[maybe_unused]] long observed_pre) {
+void SAPPISServer::updateDynamicMetrics(const std::string& key, long observed_inf, [[maybe_unused]] long observed_pre) {
     if (profiles.find(key) == profiles.end()) return;
-    
     auto& prof = profiles.at(key);
     const double alpha = 0.2; 
-
     if (observed_inf > 0) {
         long current = prof.dynamic_inf_ms.load();
         long next = (long)((alpha * observed_inf) + ((1.0 - alpha) * current));
         prof.dynamic_inf_ms.store(next);
-        std::cout << "[Dynamic] " << key << " updated to " << next << "ms" << std::endl;
+        std::cout << "[EMA] " << key << " updated: " << next << "ms" << std::endl;
     }
 }
 
 void SAPPISServer::saveDynamicProfile() {
-    std::lock_guard<std::mutex> lock(mtx_profiles); // Ensure thread safety during save
-    std::ofstream out("profile_dynamic.cfg");
-    out << "# model, batch, static_pre, static_inf, threads, max_buff, file_mb, pre_mem, inf_mem, DYNAMIC_INF\n";
+    std::lock_guard<std::mutex> lock(mtx_profiles);
+    std::string path = sys.dynamic_profile_path.empty() ? "logs/dynamic_profile.cfg" : sys.dynamic_profile_path;
+    std::ofstream out(path);
+    if (!out.is_open()) return;
+    out << "# model, batch, pre_static, inf_static, threads, max_buff, file_mb, pre_mem, inf_mem, DYNAMIC_INF_AVG\n";
     for (auto const& [key, p] : profiles) {
         out << p.model << ", " << p.batch << ", " << p.preproc_ms << ", " << p.inference_ms << ", "
             << p.threads << ", " << p.max_buffer << ", " << p.file_size_mb << ", " 
             << p.pre_mem_mb << ", " << p.inf_mem_mb << ", " << p.dynamic_inf_ms.load() << "\n";
     }
-    std::cout << "[SAPPIS] Saved learned performance data to profile_dynamic.cfg" << std::endl;
 }

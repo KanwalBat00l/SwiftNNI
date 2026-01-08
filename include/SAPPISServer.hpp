@@ -6,11 +6,14 @@
 #include "IScheduler.hpp"
 #include "Logger.hpp"
 
+
 // Standard Library Headers
 #include <memory>  // REQUIRED for std::unique_ptr
 #include <map>     // REQUIRED for std::map
 #include <string>  // REQUIRED for std::string
 #include <atomic>  // REQUIRED for std::atomic
+#include <fstream> // Required for ofstream
+
 
 /**
  * @class SAPPISServer
@@ -33,10 +36,13 @@ private:
 
     // Feedback Loop for Dynamic Profiling
     void updateDynamicMetrics(const std::string& key, long observed_inf, long observed_pre);
+    void saveDynamicProfile(); // 
 
     // System Components
     SystemConfig sys;
     std::map<std::string, ModelProfile> profiles;
+    std::mutex mtx_profiles; // ADD THIS FOR THREAD SAFETY
+
     
     // Smart Pointers for Resource Management
     std::unique_ptr<ResourceManager> rm;

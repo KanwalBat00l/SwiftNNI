@@ -23,6 +23,7 @@ public:
      * @return Vector of physical core IDs.
      */
     std::vector<int> acquireInferenceCores(int count);
+    std::vector<int> acquireCoresElastic(int requested);
 
     /**
      * @brief Frees cores back to the available pool.

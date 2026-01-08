@@ -75,6 +75,47 @@ std::vector<int> ResourceManager::acquireInferenceCores(int count) {
     return {}; // Not enough cores available to satisfy request
 }
 
+/**
+ * @brief Performs Elastic Under-allocation to prevent job starvation.
+ * 
+ * Logic:
+ * 1. Checks if pinning is enabled. If not, returns requested dummy IDs (-1).
+ * 2. Scans the 'Inference Pool' for cores not currently in 'busy_cores'.
+ * 3. Allocates up to 'requested' threads.
+ * 4. If 'requested' is 8 but only 3 are free, it reserves those 3 and returns them.
+ * 5. Returns an empty vector ONLY if the system is at 100% core utilization (0 free).
+ * 
+ * @param requested The ideal number of threads for the model.
+ * @return A vector of physical core IDs (Actual count may be <= requested).
+ */
+std::vector<int> ResourceManager::acquireCoresElastic(int requested) {
+    std::lock_guard<std::mutex> lock(mtx);
+    std::vector<int> allocated;
+    
+    // If pinning is disabled, we return the requested count as dummy values
+    if (!pinning_enabled) {
+        return std::vector<int>(requested, -1);
+    }
+
+    // Traverse the inference bucket
+    for (int core_id : inference_pool) {
+        // If the core is available, grab it
+        if (busy_cores.find(core_id) == busy_cores.end()) {
+            allocated.push_back(core_id);
+            busy_cores.insert(core_id);
+            
+            // Stop if we've reached the requested thread count
+            if (allocated.size() == static_cast<size_t>(requested)) {
+                break;
+            }
+        }
+    }
+
+    // NOTE: This could return a vector of size 1 if only one core was free.
+    // The Dispatcher will use the resulting size to build the taskset command.
+    return allocated;
+}
+
 void ResourceManager::releaseCores(const std::vector<int>& cores) {
     std::lock_guard<std::mutex> lock(mtx);
     for (int c : cores) {

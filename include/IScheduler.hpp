@@ -4,37 +4,61 @@
 #include "ResourceManager.hpp"
 #include "SystemMonitor.hpp"
 #include <optional>
+#include <list>
+#include <mutex>
 #include <map>
 
-/**
- * @class IScheduler
- * @brief Interface for resource-aware job scheduling.
- */
 class IScheduler {
 public:
     virtual ~IScheduler() = default;
 
     /**
-     * @brief Adds a job to the queue.
+     * @brief Adds a job. Marked VIRTUAL to allow SAScheduler to override.
      */
-    virtual void push(const Job& j) = 0;
+    virtual void push(const Job& j) {
+        std::lock_guard<std::mutex> lock(mtx);
+        queue.push_back(j);
+    }
+
+    virtual std::optional<Job> pop() { return std::nullopt; }
 
     /**
-     * @brief Standard FIFO/Priority pop.
-     */
-    virtual std::optional<Job> pop() = 0;
-
-    /**
-     * @brief Resource-Aware Pop: Finds the oldest/highest priority job that 
-     * has all dependencies (File, Cores, RAM) ready. 
-     * Prevents Head-of-Line (HoL) blocking.
+     * @brief Shared Bypass Logic.
      */
     virtual std::optional<Job> popReadyJob(
         FileManager& fm, 
-        ResourceManager& rm, 
         std::map<std::string, ModelProfile>& profiles,
         double total_mem_gb
-    ) = 0;
+    ) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (queue.empty()) return std::nullopt;
 
-    virtual size_t size() = 0;
+        sortQueue(profiles, total_mem_gb);
+
+        auto it = queue.begin();
+        while (it != queue.end()) {
+            std::string key = it->model + "_" + std::to_string(it->batch);
+            std::string file_prefix = fm.acquireFile(key);
+            
+            if (!file_prefix.empty()) {
+                Job selected = *it;
+                selected.assigned_file = file_prefix;
+                queue.erase(it);
+                return selected;
+            }
+            ++it;
+        }
+        return std::nullopt;
+    }
+
+    virtual size_t size() {
+        std::lock_guard<std::mutex> lock(mtx);
+        return queue.size();
+    }
+
+protected:
+    virtual void sortQueue(std::map<std::string, ModelProfile>& profiles, double total_mem_gb) = 0;
+
+    std::list<Job> queue;
+    std::mutex mtx;
 };
