@@ -16,7 +16,8 @@ public:
     }
 
 protected:
-    void sortQueue(std::map<std::string, ModelProfile>& profiles, [[maybe_unused]] double total_mem_gb) override {
+    void sortQueue([[maybe_unused]] std::map<std::string, ModelProfile>& profiles, 
+    [[maybe_unused]] double total_mem_gb) override {
         if (!needsOptimization || queue.size() < 2) return;
 
         // Convert list window to vector for random access swaps

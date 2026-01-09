@@ -48,6 +48,7 @@ SystemConfig ConfigManager::loadSystemConfig(const std::string& filename) {
             else if (key == "PORT_RANGE") cfg.port_range = std::stoi(value);
             else if (key == "SCHEDULER_MODE") cfg.scheduler_mode = value;
             else if (key == "DEFAULT_SLO_K_FACTOR") cfg.default_slo_k_factor = std::stod(value);
+            else if (key == "VFT_SAFETY_MARGIN") cfg.vft_safety_margin = std::stod(value);
             else if (key == "AGING_FACTOR") cfg.aging_factor = std::stod(value);
             else if (key == "SERVER_CMD_TEMPLATE") cfg.server_cmd_template = value;
             else if (key == "PREPROC_CMD_TEMPLATE") cfg.preproc_cmd_template = value;
@@ -56,7 +57,7 @@ SystemConfig ConfigManager::loadSystemConfig(const std::string& filename) {
             else if (key == "SYS_FILE") cfg.sys_file = value;
             // New Config Keys for AI and Dynamic Profiling
             else if (key == "DQN_WEIGHTS_PATH") cfg.dqn_weights_path = value;
-            else if (key == "DYNAMIC_PROFILE_PATH") cfg.dynamic_profile_path = value;
+            else if (key == "DYNAMIC_PROFILE_FILE") cfg.dynamic_profile_path = value;
         }
     }
     return cfg;

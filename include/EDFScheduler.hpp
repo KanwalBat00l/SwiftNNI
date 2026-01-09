@@ -17,7 +17,7 @@ protected:
      * @param total_mem_gb (Unused by EDF)
      */
     void sortQueue([[maybe_unused]] std::map<std::string, ModelProfile>& profiles, 
-                   [[maybe_unused]] double total_mem_gb) override {
+        [[maybe_unused]] double total_mem_gb) override {
         
         queue.sort([](const Job& a, const Job& b) {
             // Absolute Deadline = Arrival Time + Requested SLO

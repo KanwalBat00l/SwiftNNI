@@ -1,27 +1,17 @@
 #pragma once
-
 #include "Types.hpp"
 #include "ResourceManager.hpp"
 #include "FileManager.hpp"
 #include "IScheduler.hpp"
 #include "Logger.hpp"
+#include "ActiveJobTracker.hpp" 
 
+#include <memory>
+#include <map>
+#include <atomic>
+#include <mutex>
+#include <fstream>
 
-// Standard Library Headers
-#include <memory>  // REQUIRED for std::unique_ptr
-#include <map>     // REQUIRED for std::map
-#include <string>  // REQUIRED for std::string
-#include <atomic>  // REQUIRED for std::atomic
-#include <fstream> // Required for ofstream
-
-
-/**
- * @class SAPPISServer
- * @brief The main orchestration engine for SAPPIS.
- * 
- * Manages the lifecycle of background threads (Dispatcher, Replenisher) 
- * and handles incoming client connections via the Listener loop.
- */
 class SAPPISServer {
 public:
     SAPPISServer(SystemConfig sys, std::map<std::string, ModelProfile> profiles);
@@ -29,28 +19,23 @@ public:
     void stop();
 
 private:
-    // Core Processing Loops
     void dispatcherLoop();
     void replenisherLoop();
     void listenerLoop();
 
-    // Feedback Loop for Dynamic Profiling
     void updateDynamicMetrics(const std::string& key, long observed_inf, long observed_pre);
-    void saveDynamicProfile(); // 
+    void saveDynamicProfile();
 
-    // System Components
     SystemConfig sys;
     std::map<std::string, ModelProfile> profiles;
-    std::mutex mtx_profiles; // ADD THIS FOR THREAD SAFETY
+    std::mutex mtx_profiles;
 
-    
-    // Smart Pointers for Resource Management
     std::unique_ptr<ResourceManager> rm;
     std::unique_ptr<FileManager> fm;
     std::unique_ptr<IScheduler> scheduler;
     std::unique_ptr<Logger> logger;
+    std::unique_ptr<ActiveJobTracker> job_tracker; // NEW
 
-    // Control State
     std::atomic<bool> running{true};
     int server_fd{-1};
 };

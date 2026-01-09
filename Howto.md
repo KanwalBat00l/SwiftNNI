@@ -53,5 +53,5 @@ salloc \
   --ntasks-per-node=1 \
   --cpus-per-task=8 \
   --mem=16G \
-  --time=00:10:00 \
+  --time=00:20:00 \
   --partition=genoa

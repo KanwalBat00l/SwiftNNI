@@ -6,7 +6,8 @@ class SJFScheduler : public IScheduler {
 public:
     SJFScheduler(double aging_factor) : aging_factor(aging_factor) {}
 protected:
-    void sortQueue(std::map<std::string, ModelProfile>& profiles, [[maybe_unused]] double total_mem_gb) override {
+    void sortQueue(std::map<std::string, ModelProfile>& profiles, 
+    [[maybe_unused]] double total_mem_gb) override {
         long now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch()).count();
         queue.sort([&](const Job& a, const Job& b) {

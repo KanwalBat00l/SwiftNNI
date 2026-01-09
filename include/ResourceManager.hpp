@@ -10,17 +10,15 @@
  */
 class ResourceManager {
 public:
-    ResourceManager(int total_cores, int port_base, int port_range, int max_preproc, bool enable_pinning);
+    ResourceManager(int requested_cores, int port_base, int port_range, int max_preproc, bool enable_pinning);
 
     /**
      * @brief Reserves a specific core for a Dealer (pre-processing).
-     * @return Physical core ID or -1 if none available.
      */
     int acquireDealerCore();
 
     /**
      * @brief Reserves a set of cores for Inference.
-     * @return Vector of physical core IDs.
      */
     std::vector<int> acquireInferenceCores(int count);
     std::vector<int> acquireCoresElastic(int requested);
@@ -31,7 +29,7 @@ public:
     void releaseCores(const std::vector<int>& cores);
     
     /**
-     * @brief Port management.
+     * @brief Port management using Round-Robin entropy.
      */
     int acquirePort();
     void releasePort(int port);
@@ -56,9 +54,11 @@ private:
     std::vector<int> inference_pool;
     std::set<int> busy_cores;
 
-    // Network Ports
-    std::set<int> available_ports;
-    
+    // --- Port Management (Fixed for Iteration 7.0) ---
+    std::vector<int> available_ports_vec; // Sequential list for Round-Robin
+    std::set<int> busy_ports;             // Currently active ports
+    size_t next_port_idx;                 // Needle for Port Entropy
+
     // Throttling
     int max_preproc;
     int active_preproc;

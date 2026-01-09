@@ -4,8 +4,8 @@
 
 class LSTScheduler : public IScheduler {
 protected:
-    void sortQueue(std::map<std::string, ModelProfile>& profiles, 
-                   [[maybe_unused]] double total_mem_gb) override {
+    void sortQueue([[maybe_unused]] std::map<std::string, ModelProfile>& profiles, 
+    [[maybe_unused]] double total_mem_gb) override {
         
         long now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch()).count();
