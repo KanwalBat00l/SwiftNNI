@@ -8,17 +8,16 @@
 #include <sstream>
 #include <sys/wait.h>
 #include <chrono>
-#include <thread>
-#include "ConfigManager.hpp"
 #include "StringUtils.hpp"
+#include "ConfigManager.hpp"
 
 struct ClientConfig {
     std::string snni_dir;
     std::string client_cmd_template;
 };
 
-ClientConfig loadClientConfig(std::string path) {
-    std::ifstream file(path);
+ClientConfig loadClientConfig() {
+    std::ifstream file("client.cfg");
     ClientConfig cfg;
     std::string line;
     while (std::getline(file, line)) {
@@ -34,8 +33,8 @@ ClientConfig loadClientConfig(std::string path) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 6) {
-        std::cerr << "Usage: ./Kairos_client <Srv_IP> <Srv_Port> <Model> <Batch> <SLO_ms>\n";
+    if (argc < 5) {
+        std::cerr << "Usage: ./Swift_client <Srv_IP> <Srv_Port> <Model> <Batch>\n";
         return 1;
     }
 
@@ -43,14 +42,12 @@ int main(int argc, char* argv[]) {
     int srv_port = std::stoi(argv[2]);
     std::string model = argv[3];
     int batch = std::stoi(argv[4]);
-    long slo_ms = std::stol(argv[5]);
 
-    ClientConfig cfg = loadClientConfig("client.cfg");
+    ClientConfig cfg = loadClientConfig();
 
     // 1. Connection
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
+    sockaddr_in serv_addr{};
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons((uint16_t)srv_port);
     inet_pton(AF_INET, srv_ip.c_str(), &serv_addr.sin_addr);
@@ -60,96 +57,55 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 2. Protocol Handshake
-    std::string req = "r_" + model + "_" + std::to_string(batch) + "_" + std::to_string(slo_ms);
+    // 2. Simple Request: r_model_batch
+    std::string req = "r_" + model + "_" + std::to_string(batch);
     send(sock, req.c_str(), req.length(), 0);
 
-    char buf[1024] = {0};
-    int n = read(sock, buf, sizeof(buf)-1);
-    if (n <= 0) return 1;
-
-    // Q-2: TTFR Handshake — respond to PING probe if received
-    std::string resp(buf, n);
-    if (resp.find("TTFR_PING") != std::string::npos) {
-        send(sock, "TTFR_PONG", 9, 0);
-        // Read the actual admission response
-        memset(buf, 0, sizeof(buf));
-        n = read(sock, buf, sizeof(buf)-1);
-        if (n <= 0) return 1;
-        resp = std::string(buf, n);
-    }
-
-    // Q-3: Handle negotiation proposal if received
-    if (resp.find("NEGOTIATE:") != std::string::npos) {
-        std::cout << "[Client] Server proposes alternative: " << resp << std::endl;
-        send(sock, "ACCEPT", 6, 0);
-        memset(buf, 0, sizeof(buf));
-        n = read(sock, buf, sizeof(buf)-1);
-        if (n <= 0) return 1;
-        resp = std::string(buf, n);
-    }
-
-    if (resp.find("ACCEPTED") == std::string::npos) {
-        std::cout << "[Client] Rejected: " << resp << std::endl;
+    // 3. Wait for Admission (ACCEPTED)
+    char buf[256] = {0};
+    int n = read(sock, buf, 255);
+    if (n <= 0 || std::string(buf).find("ACCEPTED") == std::string::npos) {
+        std::cerr << "[Client] Request Rejected by Server" << std::endl;
+        close(sock);
         return 1;
     }
 
-    // 3. Wait for Dispatch
-    std::cout << "[Client] Waiting for dispatch..." << std::endl;
+    // 4. Wait for Dispatch (PORT:x;THREADS:y)
+    std::cout << "[Client] Queued. Waiting for resources..." << std::endl;
     memset(buf, 0, sizeof(buf));
-    n = read(sock, buf, sizeof(buf)-1);
+    n = read(sock, buf, 255);
     if (n <= 0) return 1;
-    std::string dispatch = buf;
+    std::string dispatch(buf);
     close(sock);
 
-    // 4. Parse & Command Prep
-    // Dispatch format: "START_INF:<IP>:<PORT>:<MODEL_BATCH>:<FILE_PREFIX>"
-    std::stringstream ss(dispatch);
-    std::string item;
-    std::vector<std::string> p;
-    while (std::getline(ss, item, ':')) p.push_back(item);
-
-    if (p.size() < 5) {
-        std::cerr << "[Client] Bad dispatch: " << dispatch << std::endl;
-        return 1;
+    // Parse PORT:47101;THREADS:4
+    int port = 0, threads = 1;
+    size_t p_pos = dispatch.find("PORT:");
+    size_t t_pos = dispatch.find(";THREADS:");
+    if (p_pos != std::string::npos && t_pos != std::string::npos) {
+        port = std::stoi(dispatch.substr(p_pos + 5, t_pos - (p_pos + 5)));
+        threads = std::stoi(dispatch.substr(t_pos + 9));
     }
 
-    // p[0]=START_INF, p[1]=IP, p[2]=PORT, p[3]=model_batch, p[4]=file_prefix
-    // Extract model and batch from key (e.g., "simc1_1" → model="simc1", batch=1)
-    std::string key = p[3];
-    auto uscore = key.rfind('_');
-    std::string d_model = key.substr(0, uscore);
-    int d_batch = std::stoi(key.substr(uscore + 1));
+    // 5. Build command and execute
+    // Template: ./benchmark-{MODEL} 1 {SERVER_IP} {PORT} {BATCH}
+    // (Note: Mode 1 clients usually don't need the filename, but we provide it for safety)
+    std::string cmd = StringUtils::buildCommand(cfg.client_cmd_template, cfg.snni_dir, 
+                                               model, batch, port, "", srv_ip, threads);
 
-    std::string cmd = StringUtils::buildCommand(cfg.client_cmd_template, cfg.snni_dir,
-                                               d_model, d_batch, std::stoi(p[2]), p[4], p[1]);
-
-    // 5. Execution with Zombie Guard
-    // Guard timeout = SLO + 30s buffer
-    int zombie_guard_sec = static_cast<int>((slo_ms / 1000) + 30);
+    std::cout << "[Client] Executing Mode 1 Connection..." << std::endl;
+    
+    setenv("OMP_NUM_THREADS", std::to_string(threads).c_str(), 1);
     
     pid_t pid = fork();
     if (pid == 0) {
         execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)NULL);
         _exit(127);
     } else {
-        auto start = std::chrono::steady_clock::now();
         int status;
-        while (true) {
-            pid_t res = waitpid(pid, &status, WNOHANG);
-            if (res == pid) {
-                std::cout << "[Client] Finished. RC: " << WEXITSTATUS(status) << std::endl;
-                break;
-            }
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > zombie_guard_sec) {
-                std::cerr << "[Client] Safety timeout hit. Killing stuck process." << std::endl;
-                kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
+        waitpid(pid, &status, 0);
+        std::cout << "[Client] Inference Session Closed. RC: " << WEXITSTATUS(status) << std::endl;
     }
+
     return 0;
 }

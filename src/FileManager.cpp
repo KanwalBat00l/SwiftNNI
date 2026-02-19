@@ -1,66 +1,59 @@
 #include "FileManager.hpp"
-#include <mutex>
 #include <chrono>
-#include <algorithm>
+#include <iostream>
+#include <filesystem>
 
-/**
- * @brief Starts a new pre-processing task.
- * Pre-pends the model name for auditability (e.g. alexnet_1_f_170000000).
- */
-std::string FileManager::initiateFile(const std::string& model_key) {
+FileStatus FileManager::getStatus(const std::string& model_key) {
+    std::lock_guard<std::mutex> lock(mtx);
+    if (file_states.find(model_key) == file_states.end()) return FileStatus::DIRTY;
+    return file_states[model_key].status;
+}
+
+std::string FileManager::initiatePreproc(const std::string& model_key) {
     std::lock_guard<std::mutex> lock(mtx);
     
     auto now = std::chrono::high_resolution_clock::now();
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
     
-    // Auditable prefix
-    std::string prefix = model_key + "_f_" + std::to_string(micros);
+    // Create unique name: e.g., "simc2_4_17000000.vmfb"
+    std::string filename = model_key + "_" + std::to_string(micros) + ".vmfb";
 
-    file_map[model_key].push_back({prefix, FileStatus::CREATING});
-    return prefix;
+    file_states[model_key].filename = filename;
+    file_states[model_key].status = FileStatus::GENERATING;
+    
+    return filename;
 }
 
-void FileManager::setReady(const std::string& model_key, const std::string& prefix) {
+void FileManager::setReady(const std::string& model_key, const std::string& filename) {
     std::lock_guard<std::mutex> lock(mtx);
-    if (file_map.find(model_key) == file_map.end()) return;
-
-    for (auto& entry : file_map[model_key]) {
-        if (entry.prefix == prefix) {
-            entry.status = FileStatus::READY;
-            return;
-        }
+    if (file_states[model_key].filename == filename) {
+        file_states[model_key].status = FileStatus::READY;
     }
 }
 
-/**
- * @brief Thread-safe resource acquisition.
- * Finds a READY file and immediately marks it IN_USE to prevent double-allocation.
- */
 std::string FileManager::acquireFile(const std::string& model_key) {
     std::lock_guard<std::mutex> lock(mtx);
-    if (file_map.find(model_key) == file_map.end()) return "";
-
-    for (auto& entry : file_map[model_key]) {
-        if (entry.status == FileStatus::READY) {
-            entry.status = FileStatus::IN_USE;
-            return entry.prefix;
-        }
+    if (file_states.find(model_key) == file_states.end() || 
+        file_states[model_key].status != FileStatus::READY) {
+        return "";
     }
-    return "";
+
+    std::string file_to_use = file_states[model_key].filename;
+    
+    // Move to DIRTY immediately so the next request triggers a new pre-proc
+    file_states[model_key].status = FileStatus::DIRTY;
+    file_states[model_key].filename = "";
+
+    return file_to_use;
 }
 
-void FileManager::releaseFile(const std::string& model_key, const std::string& prefix) {
-    std::lock_guard<std::mutex> lock(mtx);
-    if (file_map.find(model_key) == file_map.end()) return;
-
-    auto& vec = file_map[model_key];
-    vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const FileEntry& e) {
-        return e.prefix == prefix;
-    }), vec.end());
-}
-
-int FileManager::getActiveCount(const std::string& model_key) {
-    std::lock_guard<std::mutex> lock(mtx);
-    if (file_map.find(model_key) == file_map.end()) return 0;
-    return static_cast<int>(file_map[model_key].size());
+void FileManager::deleteFile(const std::string& filename, const std::string& snni_dir) {
+    try {
+        std::string full_path = snni_dir + "/" + filename;
+        if (std::filesystem::exists(full_path)) {
+            std::filesystem::remove(full_path);
+        }
+    } catch (...) {
+        // Silently fail if file can't be deleted (e.g. permission or already gone)
+    }
 }

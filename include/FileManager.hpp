@@ -1,52 +1,53 @@
 #pragma once
 #include <string>
-#include <vector>
 #include <map>
 #include <mutex>
-#include <chrono>
 #include "Types.hpp"
 
 /**
  * @class FileManager
- * @brief Manages the lifecycle of SHARK pre-processed data files.
+ * @brief Manages the lifecycle of single-use .vmfb files.
  * 
- * Tracks files through states: CREATING -> READY -> IN_USE.
- * Each file is identified by a unique timestamped prefix to allow concurrency.
+ * Flow: initiatePreproc (DIRTY -> GENERATING) 
+ *       -> setReady (GENERATING -> READY)
+ *       -> acquireFile (READY -> DIRTY + trigger next)
  */
 class FileManager {
 public:
     /**
-     * @brief Reserves a slot and returns a unique prefix for a new Dealer task.
+     * @brief Checks if a model_batch has a file ready for inference.
      */
-    std::string initiateFile(const std::string& model_key);
+    FileStatus getStatus(const std::string& model_key);
 
     /**
-     * @brief Moves a file from CREATING to READY state.
+     * @brief Reserves the "Generating" slot. Returns a unique filename.
      */
-    void setReady(const std::string& model_key, const std::string& prefix);
+    std::string initiatePreproc(const std::string& model_key);
 
     /**
-     * @brief Picks a READY file for inference and marks it IN_USE.
+     * @brief Marks a specific filename as READY for a model.
+     */
+    void setReady(const std::string& model_key, const std::string& filename);
+
+    /**
+     * @brief Picks the ready file, moves status to DIRTY. 
+     * @return The filename to be used by the inference server.
      */
     std::string acquireFile(const std::string& model_key);
 
     /**
-     * @brief Final step: Removes the file from the tracking map.
+     * @brief Physically deletes the file from disk after inference is done.
      */
-    void releaseFile(const std::string& model_key, const std::string& prefix);
-
-    /**
-     * @brief Returns the total count of files (Creating + Ready + InUse) for a model.
-     */
-    int getActiveCount(const std::string& model_key);
+    void deleteFile(const std::string& filename, const std::string& snni_dir);
 
 private:
-    struct FileEntry {
-        std::string prefix;
-        FileStatus status;
+    std::mutex mtx;
+    
+    struct FileInfo {
+        std::string filename;
+        FileStatus status = FileStatus::DIRTY;
     };
 
-    std::mutex mtx;
-    // Map: model_key -> vector of tracked file entries
-    std::map<std::string, std::vector<FileEntry>> file_map;
+    // Map: "model_batch" -> FileInfo
+    std::map<std::string, FileInfo> file_states;
 };

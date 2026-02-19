@@ -1,33 +1,27 @@
 #include "ConfigManager.hpp"
-#include "KairosServer.hpp"
+#include "SwiftServer.hpp"
 #include <csignal>
 #include <iostream>
-#include <getopt.h> // Include this for argument parsing
+#include <getopt.h>
 
+SwiftServer* global_ptr = nullptr;
 
-KairosServer* global_ptr = nullptr;
-
-void handle_signal([[maybe_unused]] int sig) {
-    if (global_ptr) global_ptr->stop();
+void handle_signal(int sig) {
+    if (global_ptr) {
+        std::cout << "\n[Swift] Received signal (" << sig << "), shutting down..." << std::endl;
+        global_ptr->stop();
+    }
 }
 
-#include <getopt.h> // Include this for argument parsing
-
 int main(int argc, char* argv[]) {
-    // Default values
     std::string config_file = "config.cfg";
     std::string profile_file = "profile.cfg";
 
-    // --- Command Line Argument Parsing ---
     int opt;
     while ((opt = getopt(argc, argv, "c:p:h")) != -1) {
         switch (opt) {
-            case 'c':
-                config_file = optarg;
-                break;
-            case 'p':
-                profile_file = optarg;
-                break;
+            case 'c': config_file = optarg; break;
+            case 'p': profile_file = optarg; break;
             case 'h':
             default:
                 std::cout << "Usage: " << argv[0] << " [-c config_path] [-p profile_path]\n";
@@ -35,24 +29,29 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Capture Ctrl+C for graceful shutdown
     signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     try {
-        std::cout << "[Kairos] Loading System Config: " << config_file << std::endl;
+        std::cout << "[Swift] Loading System Config: " << config_file << std::endl;
         SystemConfig sys = ConfigManager::loadSystemConfig(config_file);
         
-        std::cout << "[Kairos] Loading Model Profiles: " << profile_file << std::endl;
+        std::cout << "[Swift] Loading Model Profiles: " << profile_file << std::endl;
         auto profiles = ConfigManager::loadProfiles(profile_file);
 
-        // ... (Rest of the server initialization stays the same) ...
-        KairosServer server(sys, profiles);
+        // Instantiate the SwiftNNI Server
+        SwiftServer server(sys, profiles);
         global_ptr = &server;
         
+        std::cout << "[Swift] Server initialized. Mode: " << sys.scheduler_mode << std::endl;
         server.start();
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal Error: " << e.what() << std::endl;
         return 1;
     }
+
+    std::cout << "[Swift] Shutdown complete." << std::endl;
     return 0;
 }
