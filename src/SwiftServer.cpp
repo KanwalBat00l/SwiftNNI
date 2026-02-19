@@ -1,10 +1,9 @@
-#include "KairosServer.hpp"
+#include "SwiftServer.hpp"
 #include "StringUtils.hpp"
 #include "ProcessLauncher.hpp"
 #include "SystemMonitor.hpp"
 #include "ConfigManager.hpp"
 #include "SchedulerFactory.hpp"
-#include "SAScheduler.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -28,10 +27,10 @@ static long nowMs() {
 static std::atomic<long> g_req_counter{0};
 
 /**
- * @brief Constructor for KairosServer.
+ * @brief Constructor for SwiftServer.
  * Initializes managers and uses the Factory to instantiate the chosen scheduler.
  */
-KairosServer::KairosServer(SystemConfig config, std::map<std::string, ModelProfile> model_profiles)
+SwiftServer::SwiftServer(SystemConfig config, std::map<std::string, ModelProfile> model_profiles)
     : sys(config), profiles(model_profiles) {
 
     // Initialize Resource, File, and Log Managers
@@ -56,7 +55,7 @@ KairosServer::KairosServer(SystemConfig config, std::map<std::string, ModelProfi
  *
  * Black-box approach: only uses the existing TCP connection, no SHARK internals.
  */
-double KairosServer::measureTTFR_Timer1(int client_sock) {
+double SwiftServer::measureTTFR_Timer1(int client_sock) {
     auto t0 = std::chrono::steady_clock::now();
 
     // Send TTFR probe
@@ -100,7 +99,7 @@ double KairosServer::measureTTFR_Timer1(int client_sock) {
  * If client refuses, penalty_phi = 1 is applied (lower scheduling priority).
  * If client accepts, out_model/out_batch are updated to the alternative.
  */
-bool KairosServer::negotiateWithClient(int client_sock, const std::string& original_key,
+bool SwiftServer::negotiateWithClient(int client_sock, const std::string& original_key,
                                        [[maybe_unused]] double theta_c,
                                        std::string& out_model, int& out_batch,
                                        int& out_penalty_phi) {
@@ -179,16 +178,16 @@ bool KairosServer::negotiateWithClient(int client_sock, const std::string& origi
     }
 }
 
-void KairosServer::start() {
+void SwiftServer::start() {
     running = true;
     throughput_start_ts = nowMs();
-    std::thread d_thread(&KairosServer::dispatcherLoop, this);
-    std::thread r_thread(&KairosServer::replenisherLoop, this);
+    std::thread d_thread(&SwiftServer::dispatcherLoop, this);
+    std::thread r_thread(&SwiftServer::replenisherLoop, this);
 
     // Q-8: Start telemetry thread if enabled
     std::thread t_thread;
     if (sys.enable_time_series_logging) {
-        t_thread = std::thread(&KairosServer::telemetryLoop, this);
+        t_thread = std::thread(&SwiftServer::telemetryLoop, this);
     }
 
     try {
@@ -206,7 +205,7 @@ void KairosServer::start() {
     if (t_thread.joinable()) t_thread.join();
 }
 
-void KairosServer::stop() {
+void SwiftServer::stop() {
     running = false;
     saveDynamicProfile();
     if (server_fd != -1) { shutdown(server_fd, SHUT_RDWR); close(server_fd); }
@@ -218,7 +217,7 @@ void KairosServer::stop() {
  * Q-1: Dual-format parser — 4-field (legacy) or 8-field (Cap_c).
  * Q-4: Tier 1 Practicality + Tier 3 VFT sequential filter.
  */
- void KairosServer::listenerLoop() {
+ void SwiftServer::listenerLoop() {
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -399,7 +398,7 @@ void KairosServer::stop() {
 /**
  * DISPATCHER: Strict Core Allocation with HoL Bypass (Q-9).
  */
- void KairosServer::dispatcherLoop() {
+ void SwiftServer::dispatcherLoop() {
     SystemSnapshot snap = SystemMonitor::takeSnapshot();
     // C-23: Use configurable memory safety threshold
     const double ram_limit = snap.total_mem_gb * sys.mem_safety_threshold - sys.mem_reserve_gb;
@@ -534,7 +533,7 @@ void KairosServer::stop() {
     }
 }
 
-void KairosServer::replenisherLoop() {
+void SwiftServer::replenisherLoop() {
     while (running) {
         for (auto& [key, p] : profiles) {
             if (fm->getActiveCount(key) < p.max_buffer && rm->hasCapacityForDealer()) {
@@ -578,7 +577,7 @@ void KairosServer::replenisherLoop() {
  * Q-8: Telemetry thread — polls /proc/meminfo at configurable interval.
  * Writes to mem_trace.csv: Timestamp_ms;Mem_Active_GB;Mem_Buffer_GB;Cores_In_Use;Total_System_Load
  */
-void KairosServer::telemetryLoop() {
+void SwiftServer::telemetryLoop() {
     std::ofstream trace(sys.mem_trace_file, std::ios::app);
     if (trace.is_open() && trace.tellp() == 0) {
         trace << "Timestamp_ms;Mem_Active_GB;Mem_Buffer_GB;Cores_In_Use;Total_System_Load\n";
@@ -605,7 +604,7 @@ void KairosServer::telemetryLoop() {
     }
 }
 
-void KairosServer::updateDynamicMetrics(const std::string& key, long observed_inf, [[maybe_unused]] long observed_pre) {
+void SwiftServer::updateDynamicMetrics(const std::string& key, long observed_inf, [[maybe_unused]] long observed_pre) {
     if (profiles.find(key) == profiles.end()) return;
     auto& prof = profiles.at(key);
     if (observed_inf > 0) {
@@ -615,7 +614,7 @@ void KairosServer::updateDynamicMetrics(const std::string& key, long observed_in
     }
 }
 
-void KairosServer::saveDynamicProfile() {
+void SwiftServer::saveDynamicProfile() {
     std::lock_guard<std::mutex> lock(mtx_profiles);
     std::string path = sys.dynamic_profile_path.empty() ? "logs/dynamic_profile.cfg" : sys.dynamic_profile_path;
     std::ofstream out(path);

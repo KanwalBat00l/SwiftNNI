@@ -12,9 +12,9 @@
 #include <mutex>
 #include <fstream>
 
-class KairosServer {
+class SwiftServer {
 public:
-    KairosServer(SystemConfig sys, std::map<std::string, ModelProfile> profiles);
+    SwiftServer(SystemConfig sys, std::map<std::string, ModelProfile> profiles);
     void start();
     void stop();
 
