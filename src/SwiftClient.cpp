@@ -80,21 +80,35 @@ int main(int argc, char* argv[]) {
 
     // Parse PORT:47101;THREADS:4
     int port = 0, threads = 1;
-    size_t p_pos = dispatch.find("PORT:");
-    size_t t_pos = dispatch.find(";THREADS:");
-    if (p_pos != std::string::npos && t_pos != std::string::npos) {
-        port = std::stoi(dispatch.substr(p_pos + 5, t_pos - (p_pos + 5)));
-        threads = std::stoi(dispatch.substr(t_pos + 9));
-    }
+    std::string filename = "";
 
-    // 5. Build command and execute
-    // Template: ./benchmark-{MODEL} 1 {SERVER_IP} {PORT} {BATCH}
-    // (Note: Mode 1 clients usually don't need the filename, but we provide it for safety)
-    std::string cmd = StringUtils::buildCommand(cfg.client_cmd_template, cfg.snni_dir, 
-                                               model, batch, port, "", srv_ip, threads);
+// Improved Parsing for PORT, THREADS, and FILE
+auto parseParam = [&](std::string key) {
+    size_t pos = dispatch.find(key);
+    if (pos == std::string::npos) return std::string("");
+    size_t start = pos + key.length();
+    size_t end = dispatch.find(';', start);
+    return dispatch.substr(start, end - start);
+};
 
-    std::cout << "[Client] Executing Mode 1 Connection..." << std::endl;
+port = std::stoi(parseParam("PORT:"));
+threads = std::stoi(parseParam("THREADS:"));
+filename = parseParam("FILE:"); // Get the unique filename from server
+
+if (filename.empty()) {
+    std::cerr << "[Client] Error: Did not receive filename from server" << std::endl;
+    return 1;
+}
+
+// Build command using the received filename
+std::string cmd = StringUtils::buildCommand(cfg.client_cmd_template, cfg.snni_dir, 
+                                           model, batch, port, filename, srv_ip, threads);
+
+std::cout << "[Client] Connecting to: " << filename << " on Port: " << port << std::endl;
+
+    std::cout << "[Client] Executing Inference Connection..." << std::endl;
     
+    // Set OpenMP threads for the client process
     setenv("OMP_NUM_THREADS", std::to_string(threads).c_str(), 1);
     
     pid_t pid = fork();
@@ -104,7 +118,7 @@ int main(int argc, char* argv[]) {
     } else {
         int status;
         waitpid(pid, &status, 0);
-        std::cout << "[Client] Inference Session Closed. RC: " << WEXITSTATUS(status) << std::endl;
+        std::cout << "[Client] Session Closed. RC: " << WEXITSTATUS(status) << std::endl;
     }
 
     return 0;

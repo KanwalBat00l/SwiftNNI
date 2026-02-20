@@ -1,4 +1,5 @@
 #include "SwiftServer.hpp"
+#include "StringUtils.hpp"
 #include "ProcessRunner.hpp"
 #include "SchedulerFactory.hpp"
 #include <sys/socket.h>
@@ -8,6 +9,8 @@
 #include <sstream>
 #include <thread>
 #include <cstring>
+#include <filesystem>
+namespace fs = std::filesystem;
 
 static long nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -16,7 +19,15 @@ static long nowMs() {
 
 SwiftServer::SwiftServer(SystemConfig config, std::map<std::string, ModelProfile> model_profiles)
     : sys(config), profiles(model_profiles) {
-
+    
+    try {
+        fs::path log_path(sys.log_file);
+        if (log_path.has_parent_path()) {
+            fs::create_directories(log_path.parent_path());
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Swift] Error creating log directory: " << e.what() << std::endl;
+    }
     // SwiftNNI ResourceManager only needs to track threads and ports
     rm = std::make_unique<ResourceManager>(sys.total_cores, sys.base_port, sys.port_range,
                                            sys.max_preproc_concurrency);
@@ -113,12 +124,8 @@ void SwiftServer::listenerLoop() {
     }
 }
 
-/**
- * DISPATCHER: Resource-aware job execution.
- */
 void SwiftServer::dispatcherLoop() {
     while (running) {
-        // popReadyJob handles: 1. Ranking (SJF/FCFS) 2. File Availability Check
         auto job_opt = scheduler->popReadyJob(*fm, profiles);
         
         if (!job_opt) {
@@ -130,65 +137,59 @@ void SwiftServer::dispatcherLoop() {
         std::string key = j.model + "_" + std::to_string(j.batch);
         int threads_needed = profiles[key].threads;
 
-        // Check if we have enough threads
         if (!rm->acquireThreads(threads_needed)) {
-            // Not enough threads available, put back in queue (Bypass)
             scheduler->push(j);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
 
-        // Setup execution
         j.assigned_threads = threads_needed;
         j.assigned_port = rm->acquirePort();
         j.start_ts = nowMs();
 
-        // Calculate dynamic timeout: (est_ms * factor / 1000)
         int timeout_s = std::max(sys.min_timeout_s, 
                         (int)((j.est_inf_ms * sys.timeout_factor_inf) / 1000));
 
-        // Build Mode 0 Command
-        // Template: ./benchmark-{MODEL} 0 {SERVER_IP} {PORT} {BATCH} {FILE}
-        std::string cmd = sys.server_cmd_template;
-        auto replace = [&](std::string anchor, std::string val) {
-            size_t pos; while((pos = cmd.find(anchor)) != std::string::npos) cmd.replace(pos, anchor.length(), val);
-        };
-        replace("{MODEL}", j.model);
-        replace("{BATCH}", std::to_string(j.batch));
-        replace("{PORT}", std::to_string(j.assigned_port));
-        replace("{SERVER_IP}", sys.server_ip);
-        replace("{FILE}", j.assigned_file);
-        j.cmd = cmd;
+        // Build the handshake message including the unique filename
+        std::string handshake = "PORT:" + std::to_string(j.assigned_port) + 
+                                ";THREADS:" + std::to_string(j.assigned_threads) + 
+                                ";FILE:" + j.assigned_file + ";";
 
-        std::thread([this, j, timeout_s]() mutable {
-            // Notify Client of where to connect
-            std::string msg = "PORT:" + std::to_string(j.assigned_port) + ";THREADS:" + std::to_string(j.assigned_threads);
-            send(j.client_sock, msg.c_str(), msg.length(), 0);
+        // Dispatch the worker thread
+        std::thread([this, j, timeout_s, handshake]() mutable {
+            // 1. Send handshake to client
+            send(j.client_sock, handshake.c_str(), handshake.length(), 0);
             close(j.client_sock);
 
-            // Run process
+            // 2. Build Mode 0 Command
+            j.cmd = StringUtils::buildCommand(
+                sys.server_cmd_template, sys.snni_dir,
+                j.model, j.batch, j.assigned_port,
+                j.assigned_file, sys.server_ip, j.assigned_threads
+            );
+
+            // 3. Run inference process
             CmdResult res = ProcessRunner::run(j, sys.snni_dir, timeout_s);
 
-            // Cleanup
+            // 4. Cleanup
             j.finish_ts = nowMs();
             j.exit_code = res.rc;
             
             rm->releaseThreads(j.assigned_threads);
             rm->releasePort(j.assigned_port);
-            fm->deleteFile(j.assigned_file, sys.snni_dir); // Single-use deletion
+            fm->deleteFile(j.assigned_file, sys.snni_dir); 
             
-            logger->logJob(j); // Simple CSV log
+            logger->logJob(j);
         }).detach();
     }
-}
+} 
 
-/**
- * REPLENISHER: Manages single-use pre-processed files.
- */
+
 void SwiftServer::replenisherLoop() {
+    static std::atomic<int> preproc_port_counter{0};
+
     while (running) {
         for (auto& [key, p] : profiles) {
-            // Trigger pre-proc if status is DIRTY and we have room in pre-proc pool
             if (fm->getStatus(key) == FileStatus::DIRTY && rm->hasPreprocSlot()) {
                 
                 std::string filename = fm->initiatePreproc(key);
@@ -197,19 +198,17 @@ void SwiftServer::replenisherLoop() {
                 int timeout_s = std::max(sys.min_timeout_s, 
                                 (int)((p.pre_ms * sys.timeout_factor_pre) / 1000));
 
-                // Build Mode 2 Command
-                std::string cmd = sys.preproc_cmd_template;
-                auto replace = [&](std::string anchor, std::string val) {
-                    size_t pos; while((pos = cmd.find(anchor)) != std::string::npos) cmd.replace(pos, anchor.length(), val);
-                };
-                replace("{MODEL}", p.model);
-                replace("{BATCH}", std::to_string(p.batch));
-                replace("{PORT}", std::to_string(sys.pre_base_port)); // Generic pre-proc port
-                replace("{FILE}", filename);
+                int preproc_port = sys.pre_base_port + (preproc_port_counter.fetch_add(1) % 1000);
+
+                std::string cmd = StringUtils::buildCommand(
+                    sys.preproc_cmd_template, sys.snni_dir,
+                    p.model, p.batch, preproc_port, filename, 
+                    sys.server_ip, 1
+                );
 
                 std::thread([this, cmd, key, filename, timeout_s]() {
                     Job pj; 
-                    pj.assigned_threads = 1; // Pre-proc usually single-threaded
+                    pj.assigned_threads = 1;
                     pj.cmd = cmd;
 
                     CmdResult res = ProcessRunner::run(pj, sys.snni_dir, timeout_s);
@@ -217,9 +216,8 @@ void SwiftServer::replenisherLoop() {
                     if (res.rc == 0) {
                         fm->setReady(key, filename);
                     } else {
-                        // If failed, fm status remains GENERATING or reset to DIRTY logic
-                        // For SwiftNNI, we reset to dirty on failure to try again
-                        // (Handled by initiatePreproc implicitly)
+                        // On failure, status remains GENERATING; 
+                        // You could reset to DIRTY here if you want immediate retry.
                     }
                     rm->releasePreprocSlot();
                 }).detach();

@@ -26,7 +26,7 @@ CLIENT_OBJS = $(OBJ_DIR)/SwiftClient.o
 # Profiling tool
 PROFILER_OBJS = $(OBJ_DIR)/profiler.o
 
-all: Swift_server Swift_client profiler
+all: Swift_server Swift_client #profiler
 
 # Link Server
 Swift_server: $(SERVER_OBJS) $(COMMON_OBJS)

@@ -5,15 +5,18 @@
 ### Edge Node (24 cores, 64GB — Phase 1 Target)
 ```bash
 salloc \
-  --job-name=Kairos_Edge_Node \
+  --job-name=Edge_Node \
   --nodes=2 \
   --ntasks-per-node=1 \
   --cpus-per-task=24 \
   --mem=64G \
-  --time=00:15:00 \
+  --time=00:10:00 \
   --partition=genoa
 # NO --exclusive flag
 ```
+
+
+
 
 ### Toy Node (8 cores, 16GB — Development/Testing)
 ```bash
@@ -58,6 +61,7 @@ chmod +x toy_run.sh
 ```bash
 ./Kairos_server -c config.cfg -p profile.cfg &
 ```
+
 
 ---
 
