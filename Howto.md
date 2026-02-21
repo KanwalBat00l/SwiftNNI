@@ -6,11 +6,11 @@
 ```bash
 salloc \
   --job-name=Edge_Node \
-  --nodes=2 \
+  --nodes=1 \
   --ntasks-per-node=1 \
   --cpus-per-task=24 \
   --mem=64G \
-  --time=00:10:00 \
+  --time=00:20:00 \
   --partition=genoa
 # NO --exclusive flag
 ```
