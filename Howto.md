@@ -1,4 +1,13 @@
-# KairosSNNI — Edge Node & Toy Deployment Guide
+sbatch 40 minutes
+ssh tcn
+ping tcn
+update config.cfg ip and log file
+./Swift_server
+sleep 60 && python3 scripts/burst_client_replay.py master_workload_mixed.csv 1.0 100 172.18.60.172 8000
+wait
+delete .dat
+0.5 lambda means 1 job every 2 sec means 30 jobs per minut
+0.2 
 
 ## 1. Slurm Allocations
 
@@ -6,16 +15,19 @@
 ```bash
 salloc \
   --job-name=Edge_Node \
-  --nodes=1 \
+  --nodes=2 \
   --ntasks-per-node=1 \
-  --cpus-per-task=24 \
-  --mem=64G \
-  --time=00:20:00 \
+  --cpus-per-task=48 \
+  --mem=256G \
+  --time=01:59:00 \
   --partition=genoa
 # NO --exclusive flag
 ```
+#alexnet,16,144201,43904,8
 
 
+# Add the IP of the server at the end
+sleep 40 && python3 scripts/burst_client_replay.py master_workload_light.csv 0.5 500 172.18.60.33 8000
 
 
 ### Toy Node (8 cores, 16GB — Development/Testing)

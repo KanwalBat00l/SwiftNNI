@@ -1,6 +1,6 @@
 obj/
 *.csv
-Kairos_server
-Kairos_client
+Swift_server
+Swift_client
 test_schedulers
 logs

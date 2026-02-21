@@ -34,6 +34,9 @@ public:
     void occupyPreprocSlot();
     void releasePreprocSlot();
 
+    int getUsedThreads() { std::lock_guard<std::mutex> lk(mtx); return used_threads; }
+int getActivePreprocCount() { std::lock_guard<std::mutex> lk(mtx); return active_preproc; }
+
 private:
     std::mutex mtx;
 

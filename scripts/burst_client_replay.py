@@ -1,74 +1,84 @@
-import socket
+import subprocess
 import csv
 import time
 import sys
 import threading
+import os
 
-def send_request(model, batch, srv_ip="127.0.0.1", srv_port=8000):
-    """ Connects, sends the r_model_batch request, and exits. """
+def launch_real_client(model, batch, srv_ip, srv_port, job_id):
+    """ Executes the actual C++ Swift_client binary """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(5) # Don't hang if server is clogged
-            s.connect((srv_ip, srv_port))
-            # SwiftNNI Listener format: r_model_batch
-            msg = f"r_{model}_{batch}"
-            s.sendall(msg.encode())
-            # We don't wait for the 'ACCEPTED' response here to maximize 
-            # the burst pressure on the server's listener thread.
-    except Exception:
-        # In a high-load burst, some TCP connections might be refused.
-        # We ignore them to keep the playback timing accurate.
-        pass
+        cmd = ["./Swift_client", srv_ip, str(srv_port), model, str(batch)]
+        
+        # Run and capture result
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        if result.returncode == 0:
+            print(f"  [Client {job_id}] SUCCESS: {model}_{batch}")
+        else:
+            print(f"  [Client {job_id}] FAILED: {model}_{batch} (RC: {result.returncode})")
+            
+    except Exception as e:
+        print(f"  [Client {job_id}] EXCEPTION: {e}")
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: python3 burst_client_replay.py <master_file> <lambda> <total_jobs>")
+        print("Usage: python3 burst_client_replay.py <master_file> <lambda> <total_jobs> [srv_ip] [srv_port]")
         sys.exit(1)
 
     master_file = sys.argv[1]
     lam = float(sys.argv[2])
     total_target = int(sys.argv[3])
+    srv_ip = sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1"
+    srv_port = int(sys.argv[5]) if len(sys.argv) > 5 else 8000
 
-    # 1. Load the Master Workload
+    if not os.path.exists(master_file):
+        print(f"Error: {master_file} not found.")
+        sys.exit(1)
+
     with open(master_file, 'r') as f:
         master_list = list(csv.DictReader(f))
 
-    print(f"[Client] Replaying {total_target} jobs from {master_file} at Lambda={lam}")
+    print(f"[Launcher] Starting {total_target} jobs | Lambda: {lam}")
 
     count = 0
     start_time = time.time()
     virtual_clock = 0.0
+    threads = []
 
-    # 2. Playback Loop
+    # 1. Playback Loop
     while count < total_target:
         for j in master_list:
             if count >= total_target:
                 break
             
-            # Calculate when this job SHOULD arrive
-            # The interval in the CSV is for Lambda=1.0
             wait_time = float(j['interval']) / lam
             virtual_clock += wait_time
             
-            # 3. Synchronize with Real-world Time
             now = time.time() - start_time
             if virtual_clock > now:
                 time.sleep(virtual_clock - now)
             
-            # 4. Launch Request in a background thread
-            # This ensures the client doesn't block the timing of the next job
-            # while waiting for the TCP handshake.
-            t = threading.Thread(target=send_request, args=(j['model'], j['batch']))
-            t.daemon = True
+            # 2. Launch Client (NOT as daemon)
+            t = threading.Thread(target=launch_real_client, 
+                                 args=(j['model'], j['batch'], srv_ip, srv_port, count+1))
+            # Removing daemon=True ensures the thread stays alive until the C++ process finishes
             t.start()
+            threads.append(t)
             
             count += 1
-            if count % 100 == 0:
-                print(f"  ... Sent {count}/{total_target} jobs")
+            if count % 20 == 0:
+                print(f"[Status] Launched {count}/{total_target} jobs...")
 
-    # Give the last few threads a second to finish their handshakes
-    time.sleep(1)
-    print(f"[Client] Replay complete. Total time: {round(time.time() - start_time, 2)}s")
+    print(f"[Launcher] All {total_target} requests sent. Waiting for all inferences to complete...")
+    
+    # 3. Wait for every single thread to finish
+    for i, t in enumerate(threads):
+        t.join()
+        if (i+1) % 20 == 0:
+            print(f"  ... {i+1} inferences joined.")
+
+    print("[Launcher] All jobs completed. You can now stop the server.")
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,7 @@
 #include <thread>
 #include <cstring>
 #include <filesystem>
+
 namespace fs = std::filesystem;
 
 static long nowMs() {
@@ -40,17 +41,36 @@ SwiftServer::SwiftServer(SystemConfig config, std::map<std::string, ModelProfile
 
 void SwiftServer::start() {
     running = true;
+
+    // 1. Start Audit Monitor FIRST so it runs during the experiment
+    std::thread monitor_thread([this]() {
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            // Ensure you add these getters to ResourceManager and IScheduler
+            
+            std::cout << "[AUDIT] P : "<< logger->getPCount() 
+                      << " | R :" <<logger->getRCount() 
+                      << " | Queue: " << scheduler->size() 
+                      << " | Threads: " << rm->getUsedThreads() << "/" << sys.total_cores 
+                      << " | Active Pre-proc: " << rm->getActivePreprocCount() 
+                      << std::endl;
+        }
+    });
+    monitor_thread.detach();
+
     std::cout << "[SwiftServer] Starting threads..." << std::endl;
 
+    // 2. Start core loops
     std::thread d_thread(&SwiftServer::dispatcherLoop, this);
     std::thread r_thread(&SwiftServer::replenisherLoop, this);
 
-    listenerLoop(); // Main thread blocks here
+    // 3. Block on Listener
+    listenerLoop(); 
 
+    // 4. Join threads on shutdown
     if (d_thread.joinable()) d_thread.join();
     if (r_thread.joinable()) r_thread.join();
 }
-
 void SwiftServer::stop() {
     running = false;
     if (server_fd != -1) { 
@@ -192,33 +212,50 @@ void SwiftServer::replenisherLoop() {
         for (auto& [key, p] : profiles) {
             if (fm->getStatus(key) == FileStatus::DIRTY && rm->hasPreprocSlot()) {
                 
+                // 1. Mark as GENERATING and get unique name
                 std::string filename = fm->initiatePreproc(key);
                 rm->occupyPreprocSlot();
 
+                // 2. Setup a Job record for logging Phase 2
+                Job pj;
+                pj.type = 'p'; // Type 'p' for Pre-processing
+                pj.model = p.model;
+                pj.batch = p.batch;
+                pj.assigned_file = filename;
+                pj.assigned_threads = 1; 
+                pj.arrival_ts = nowMs(); // Time we requested the pre-proc
+                pj.start_ts = nowMs();
+
                 int timeout_s = std::max(sys.min_timeout_s, 
                                 (int)((p.pre_ms * sys.timeout_factor_pre) / 1000));
-
                 int preproc_port = sys.pre_base_port + (preproc_port_counter.fetch_add(1) % 1000);
 
-                std::string cmd = StringUtils::buildCommand(
+                pj.cmd = StringUtils::buildCommand(
                     sys.preproc_cmd_template, sys.snni_dir,
                     p.model, p.batch, preproc_port, filename, 
                     sys.server_ip, 1
                 );
 
-                std::thread([this, cmd, key, filename, timeout_s]() {
-                    Job pj; 
-                    pj.assigned_threads = 1;
-                    pj.cmd = cmd;
-
+                // 3. Dispatch the pre-processor
+                std::thread([this, pj, key, filename, timeout_s]() mutable {
                     CmdResult res = ProcessRunner::run(pj, sys.snni_dir, timeout_s);
+
+                    pj.finish_ts = nowMs();
+                    pj.exit_code = res.rc;
 
                     if (res.rc == 0) {
                         fm->setReady(key, filename);
+                        // std::cout << "[Replenisher] READY: " << filename << std::endl;
                     } else {
-                        // On failure, status remains GENERATING; 
-                        // You could reset to DIRTY here if you want immediate retry.
+                        // CRITICAL FIX: Reset to DIRTY so the system can try again.
+                        // Without this, the model stays in 'GENERATING' forever.
+                        fm->markDirty(key);
+                        std::cerr << "[Replenisher] FAILED: " << key << " RC: " << res.rc << std::endl;
                     }
+
+                    // 4. Log the pre-processing task to the CSV
+                    logger->logJob(pj);
+                    
                     rm->releasePreprocSlot();
                 }).detach();
             }
