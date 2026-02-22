@@ -27,7 +27,7 @@ salloc \
 
 
 # Add the IP of the server at the end
-sleep 40 && python3 scripts/burst_client_replay.py master_workload_light.csv 0.5 500 172.18.60.33 8000
+sleep 40 && python3 scripts/burst_client_replay.py master_workload_mixed.csv 0.5 500 172.18.58.236 8000
 
 
 ### Toy Node (8 cores, 16GB — Development/Testing)

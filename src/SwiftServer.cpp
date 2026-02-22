@@ -145,8 +145,10 @@ void SwiftServer::listenerLoop() {
 }
 
 void SwiftServer::dispatcherLoop() {
+    
     while (running) {
-        auto job_opt = scheduler->popReadyJob(*fm, profiles);
+        // Pass 'rm' into the pop function now
+        auto job_opt = scheduler->popReadyJob(*fm, *rm, profiles);
         
         if (!job_opt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -154,44 +156,29 @@ void SwiftServer::dispatcherLoop() {
         }
 
         Job j = *job_opt;
-        std::string key = j.model + "_" + std::to_string(j.batch);
-        int threads_needed = profiles[key].threads;
-
-        if (!rm->acquireThreads(threads_needed)) {
-            scheduler->push(j);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        j.assigned_threads = threads_needed;
+        // Threads are ALREADY acquired by popReadyJob here
         j.assigned_port = rm->acquirePort();
         j.start_ts = nowMs();
 
         int timeout_s = std::max(sys.min_timeout_s, 
                         (int)((j.est_inf_ms * sys.timeout_factor_inf) / 1000));
 
-        // Build the handshake message including the unique filename
         std::string handshake = "PORT:" + std::to_string(j.assigned_port) + 
                                 ";THREADS:" + std::to_string(j.assigned_threads) + 
                                 ";FILE:" + j.assigned_file + ";";
 
-        // Dispatch the worker thread
         std::thread([this, j, timeout_s, handshake]() mutable {
-            // 1. Send handshake to client
             send(j.client_sock, handshake.c_str(), handshake.length(), 0);
             close(j.client_sock);
 
-            // 2. Build Mode 0 Command
             j.cmd = StringUtils::buildCommand(
                 sys.server_cmd_template, sys.snni_dir,
                 j.model, j.batch, j.assigned_port,
                 j.assigned_file, sys.server_ip, j.assigned_threads
             );
 
-            // 3. Run inference process
             CmdResult res = ProcessRunner::run(j, sys.snni_dir, timeout_s);
 
-            // 4. Cleanup
             j.finish_ts = nowMs();
             j.exit_code = res.rc;
             
@@ -202,8 +189,7 @@ void SwiftServer::dispatcherLoop() {
             logger->logJob(j);
         }).detach();
     }
-} 
-
+}
 
 void SwiftServer::replenisherLoop() {
     static std::atomic<int> preproc_port_counter{0};

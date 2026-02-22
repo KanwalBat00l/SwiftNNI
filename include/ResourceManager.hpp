@@ -37,6 +37,11 @@ public:
     int getUsedThreads() { std::lock_guard<std::mutex> lk(mtx); return used_threads; }
 int getActivePreprocCount() { std::lock_guard<std::mutex> lk(mtx); return active_preproc; }
 
+bool canAcquireThreads(int count) {
+    std::lock_guard<std::mutex> lock(mtx);
+    return (used_threads + count <= total_cores);
+}
+
 private:
     std::mutex mtx;
 
