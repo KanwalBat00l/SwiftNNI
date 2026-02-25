@@ -3,4 +3,5 @@ obj/
 Swift_server
 Swift_client
 test_schedulers
-logs
+logs/
+scripts/
